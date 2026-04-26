@@ -801,3 +801,174 @@ GET /api/v1/sse/sessions/:id/stream?token=<jwt>
 Streams only events for the specified session. Supports reconnect replay — if fewer than 100 events were missed, they are replayed on reconnection. Multiple clients can connect to the same session stream simultaneously.
 
 **Event types**: `agent:event`, `session:updated`, `permission:request`, `health`.
+
+---
+
+## WebSocket Transport (ACP Surface)
+
+The websocket adapter exposes a full-duplex transport for app clients that want one persistent connection for:
+
+- server → client ACP notifications
+- client → server ACP JSON-RPC requests
+
+### Endpoint
+
+### GET /api/v1/ws/sessions/:id/ws
+
+Upgrades the HTTP request to a WebSocket connection scoped to a single session.
+
+```text
+GET /api/v1/ws/sessions/:id/ws
+Authorization: Bearer <jwt-or-secret>
+```
+
+If your client cannot set `Authorization` headers during websocket handshake, you can also pass `?token=<jwt-or-secret>`.
+
+### Wire format (JSON-RPC 2.0)
+
+All websocket frames follow JSON-RPC 2.0.
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "session/prompt",
+  "params": {}
+}
+```
+
+Request/response/notification forms:
+
+```json
+{ "jsonrpc": "2.0", "id": 1, "method": "session/prompt", "params": { "prompt": "..." } }
+{ "jsonrpc": "2.0", "id": 1, "result": { "turnId": "turn_1", "queueDepth": 0 } }
+{ "jsonrpc": "2.0", "method": "session/update", "params": { "type": "text", "text": "..." } }
+```
+
+### Server notifications (method names)
+
+- `transport/connected` — emitted after successful socket attach with `{ connectionId, sessionId }`
+- `session/update` — normalized outbound agent message envelope (`type`, `text`, `metadata`, `sessionId`)
+- `session/permission_request` — permission gate request
+- `session/notification` — async notification from the notification pipeline
+
+### Client request methods
+
+The websocket endpoint accepts these JSON-RPC request methods:
+
+- `initialize`
+- `session/prompt`
+- `session/permission`
+- `session/cancel`
+- `session/command`
+- `ping`
+
+Use JSON-RPC `id` for request/response calls. If `id` is omitted, message is treated as a notification (no response frame).
+
+#### 1) `session/prompt`
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "session/prompt",
+  "params": {
+    "prompt": "Refactor auth middleware",
+    "attachments": [
+      { "fileName": "notes.txt", "mimeType": "text/plain", "data": "<base64>" }
+    ]
+  }
+}
+```
+
+Behavior:
+- Enqueues the prompt through the normal session middleware chain.
+- Routes turn output back to the websocket adapter (`responseAdapterId = "websocket"`).
+- Returns `result` with `{ turnId, queueDepth }`.
+
+#### 2) `session/permission`
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "session/permission",
+  "params": {
+    "permissionId": "perm_123",
+    "optionId": "allow",
+    "feedback": "Use a safer alternative"
+  }
+}
+```
+
+Behavior:
+- Resolves the pending permission gate when IDs match.
+- If `feedback` is present, aborts current turn and queues feedback as next prompt.
+- Returns `result` with `{ ok: true }`.
+
+#### 3) `session/cancel`
+
+```json
+{ "jsonrpc": "2.0", "id": 3, "method": "session/cancel", "params": {} }
+```
+
+Behavior:
+- Aborts the currently running prompt (if any).
+- Returns `result` with `{ ok: true }`.
+
+#### 4) `session/command`
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 4,
+  "method": "session/command",
+  "params": { "command": "/help" }
+}
+```
+
+Behavior:
+- Executes a registered slash command in session context.
+- Returns `result` with `{ result }`.
+
+#### 5) `ping`
+
+```json
+{ "jsonrpc": "2.0", "id": 5, "method": "ping", "params": {} }
+```
+
+Behavior:
+- Liveness check.
+- Returns `result` with `{ sessionId }`.
+
+### JSON-RPC error codes used
+
+- `-32700` Parse error
+- `-32600` Invalid Request
+- `-32601` Method not found
+- `-32602` Invalid params
+- `-32004` Session not found
+- `-32013` Connection limit reached
+- `-32040` No matching pending permission request
+- `-32050` File service unavailable
+- `-32070` Command registry unavailable
+- `-32000` Internal error
+
+### Connection admin endpoint
+
+### GET /api/v1/ws/connections
+
+Returns active websocket connections. Requires `system:admin` scope.
+
+```json
+{
+  "connections": [
+    {
+      "id": "ws_abc123",
+      "sessionId": "sess_123",
+      "connectedAt": "2026-04-26T12:00:00.000Z"
+    }
+  ],
+  "total": 1
+}
+```
