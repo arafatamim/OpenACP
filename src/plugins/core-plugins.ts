@@ -12,6 +12,7 @@ import notificationsPlugin from './notifications/index.js'
 import tunnelPlugin from './tunnel/index.js'
 import apiServerPlugin from './api-server/index.js'
 import sseAdapterPlugin from './sse-adapter/index.js'
+import websocketAdapterPlugin from './websocket-adapter/index.js'
 import telegramPlugin from './telegram/index.js'
 
 /**
@@ -45,5 +46,6 @@ export const corePlugins = [
   identityPlugin,
   // Adapter plugins (depend on security, notifications, etc.)
   sseAdapterPlugin,
+  websocketAdapterPlugin,
   telegramPlugin,
 ]

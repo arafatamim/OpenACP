@@ -801,3 +801,144 @@ GET /api/v1/sse/sessions/:id/stream?token=<jwt>
 Streams only events for the specified session. Supports reconnect replay — if fewer than 100 events were missed, they are replayed on reconnection. Multiple clients can connect to the same session stream simultaneously.
 
 **Event types**: `agent:event`, `session:updated`, `permission:request`, `health`.
+
+---
+
+## WebSocket Transport (ACP Surface)
+
+The websocket adapter exposes a full-duplex transport for app clients that want one persistent connection for:
+
+- server → client agent events (messages, permission requests, notifications)
+- client → server actions (prompt, permission decision, cancel, command)
+
+### Endpoint
+
+### GET /api/v1/ws/sessions/:id/ws
+
+Upgrades the HTTP request to a WebSocket connection scoped to a single session.
+
+```text
+GET /api/v1/ws/sessions/:id/ws
+Authorization: Bearer <jwt-or-secret>
+```
+
+If your client cannot set `Authorization` headers during websocket handshake, you can also pass `?token=<jwt-or-secret>`.
+
+### Outbound envelope (server → client)
+
+All websocket frames sent by OpenACP are JSON in this shape:
+
+```json
+{
+  "event": "message",
+  "id": "evt_1714470000000_1",
+  "timestamp": "2026-04-26T12:00:00.000Z",
+  "data": {}
+}
+```
+
+### Outbound event types
+
+- `connected`
+  - Sent once after a successful connection.
+  - `data`: `{ connectionId, sessionId }`
+- `message`
+  - Agent output event routed to this session.
+  - `data`: `{ type, sessionId, text, metadata }`
+- `permission_request`
+  - Permission gate request from the active turn.
+  - `data`: `{ sessionId, id, description, options[] }`
+- `notification`
+  - Session notification routed via notifications plugin.
+- `ack`
+  - Positive acknowledgement for inbound client actions.
+- `pong`
+  - Response to `ping`.
+- `error`
+  - Validation/state/permission errors on inbound actions.
+
+### Inbound actions (client → server)
+
+All client frames must be JSON with an `action` discriminator.
+
+#### 1) Prompt
+
+```json
+{
+  "action": "prompt",
+  "prompt": "Refactor auth middleware",
+  "attachments": [
+    { "fileName": "notes.txt", "mimeType": "text/plain", "data": "<base64>" }
+  ]
+}
+```
+
+Behavior:
+- Enqueues the prompt through the normal session middleware chain.
+- Routes turn output back to the websocket adapter (`responseAdapterId = "websocket"`).
+- Returns `ack` with `{ action: "prompt", turnId, queueDepth }`.
+
+#### 2) Permission response
+
+```json
+{
+  "action": "permission",
+  "permissionId": "perm_123",
+  "optionId": "allow",
+  "feedback": "Use a safer alternative"
+}
+```
+
+Behavior:
+- Resolves the pending permission gate when IDs match.
+- If `feedback` is present, aborts current turn and queues feedback as next prompt.
+- Returns `ack` with `{ action: "permission", ok: true }`.
+
+#### 3) Cancel
+
+```json
+{ "action": "cancel" }
+```
+
+Behavior:
+- Aborts the currently running prompt (if any).
+- Returns `ack` with `{ action: "cancel", ok: true }`.
+
+#### 4) Command
+
+```json
+{ "action": "command", "command": "/help" }
+```
+
+Behavior:
+- Executes a registered slash command in session context.
+- Returns `ack` with `{ action: "command", result }`.
+
+#### 5) Ping
+
+```json
+{ "action": "ping" }
+```
+
+Behavior:
+- Liveness check.
+- Returns `pong` with `{ sessionId }`.
+
+### Connection admin endpoint
+
+### GET /api/v1/ws/connections
+
+Returns active websocket connections. Requires `system:admin` scope.
+
+```json
+{
+  "connections": [
+    {
+      "id": "ws_abc123",
+      "sessionId": "sess_123",
+      "connectedAt": "2026-04-26T12:00:00.000Z"
+    }
+  ],
+  "total": 1
+}
+```
